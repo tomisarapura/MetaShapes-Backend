@@ -7,7 +7,7 @@ env/
 # Archivos de la base de datos local
 *.sqlite3
 
-# Scripts y estados locales (Tus archivos específicos)
+# Scripts y estados locales (Archivos específicos mio que uso para inicializar todo junto)
 states.txt
 iniciar.bat
 finalizar.bat
