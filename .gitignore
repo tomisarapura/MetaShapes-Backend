@@ -1,0 +1,16 @@
+# Caché y entornos de Python
+__pycache__/
+*.pyc
+venv/
+env/
+
+# Archivos de la base de datos local
+*.sqlite3
+
+# Scripts y estados locales (Tus archivos específicos)
+states.txt
+iniciar.bat
+finalizar.bat
+
+# Variables de entorno 
+.env
