@@ -17,6 +17,8 @@ load_dotenv()
 # --- CONFIGURACIÓN ---
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 MODEL_NAME = "qwen2.5-coder:14b"
+LOG_PIPELINE_TEXT = os.getenv("LOG_PIPELINE_TEXT", "true").lower() == "true"
+LOG_MAX_CHARS = int(os.getenv("LOG_MAX_CHARS", "12000"))
 
 # --- SYSTEM PROMPTS (PIPELINE DE 3 PASOS) ---
 SYSTEM_PROMPT_STEP_1 = """
@@ -38,41 +40,48 @@ REQUISITOS OBLIGATORIOS:
 """
 
 SYSTEM_PROMPT_STEP_3 = """
-Eres un experto en diseño paramétrico 3D e ingeniería inversa usando Python y la librería CadQuery. 
-Tu única tarea es traducir la especificación geométrica recibida a un script de Python válido, eficiente y bien estructurado utilizando CadQuery (`import cadquery as cq`).
+Eres un experto en diseño paramétrico 3D usando Python y la librería CadQuery.
+Tu única tarea es traducir la especificación geométrica recibida a un script de Python válido y eficiente usando CadQuery.
 
-REGLAS ESTRICTAS:
-1. Importa SOLAMENTE `cadquery as cq`. ESTÁ ESTRICTAMENTE PROHIBIDO importar `os`, `sys`, `subprocess`, o usar funciones como `open()`, `eval()`, `exec()`.
-2. Construye el modelo usando la API fluida de CadQuery y el árbol CSG (ej. `cq.Workplane("XY").box(...)`).
-3. Asigna el modelo final y definitivo a una variable llamada exactamente `result`.
-4. Evita bucles infinitos, recursión profunda o lógicas matemáticas extremadamente complejas. Mantén la geometría sólida y directa.
-5. Al final del script, DEBES exportar `result` a los formatos STEP y STL usando EXACTAMENTE los nombres de archivo que se te indiquen en el prompt del usuario.
-6. Devuelve ÚNICAMENTE el código Python dentro de un bloque ```python ... ```. No incluyas explicaciones ni saludos.
+REGLAS ESTRICTAS DE CADQUERY (¡CRÍTICO PARA EVITAR ERRORES!):
+1. Todo objeto debe ser un SÓLIDO 3D antes de aplicarle operaciones booleanas (.union, .cut, .intersect).
+2. NUNCA apliques .union() a un Workplane vacío o a un boceto 2D que no haya sido extruido.
+3. Para primitivas directas, usa siempre el formato completo: 
+   cq.Workplane("XY").box(x, y, z)
+   cq.Workplane("XY").cylinder(altura, radio)
+   cq.Workplane("XY").sphere(radio)
+4. Crea cada parte como una variable independiente y luego únelas al final.
+5. Usa el método .translate((x, y, z)) de CadQuery para mover los sólidos a sus posiciones correctas antes de unirlos.
+6. AL FINAL DEL SCRIPT, debes exportar el resultado final a los formatos requeridos usando las variables predefinidas `step_filename` y `stl_filename`.
+7. Devuelve ÚNICAMENTE el código Python dentro de un bloque ```python ... ```.
 
---- EJEMPLO ONE-SHOT ---
-Entrada:
-"Cilindro base de 20 mm de radio y 5 mm de alto, con un agujero pasante de 5 mm de radio en el centro. Guardar como 'modelo1.step' y 'modelo1.stl'."
-
-Salida:
+--- EJEMPLO IDEAL DE CÓDIGO ---
 ```python
 import cadquery as cq
 
-# Parámetros
-radio_base = 20
-altura_base = 5
-radio_agujero = 5
+# Parámetros (usar valores inferidos si no se especifican)
+base_x, base_y, base_z = 50, 50, 10
+cil_radio, cil_altura = 15, 20
+agujero_radio = 5
 
-# Modelo: Base cilíndrica con agujero
-result = (
-    cq.Workplane("XY")
-    .cylinder(altura_base, radio_base)
-    .faces(">Z")
-    .hole(radio_agujero * 2)  # hole() toma el diámetro
-)
+# 1. Crear las partes como sólidos independientes
+base = cq.Workplane("XY").box(base_x, base_y, base_z)
 
-# Exportar en los formatos solicitados
-cq.exporters.export(result, "modelo1.step")
-cq.exporters.export(result, "modelo1.stl")
+# 2. Posicionar las partes (ej. mover el cilindro arriba de la base)
+cilindro = cq.Workplane("XY").cylinder(cil_altura, cil_radio).translate((0, 0, base_z/2 + cil_altura/2))
+
+# 3. Unir los sólidos
+modelo_final = base.union(cilindro)
+
+# 4. Crear sólidos para cortes (diferencia)
+agujero = cq.Workplane("XY").cylinder(base_z + cil_altura + 10, agujero_radio)
+
+# 5. Aplicar el corte
+modelo_final = modelo_final.cut(agujero)
+
+# 6. Exportar (Las variables step_filename y stl_filename serán inyectadas por el sistema)
+cq.exporters.export(modelo_final, step_filename)
+cq.exporters.export(modelo_final, stl_filename)
 """
 
 def extract_code(response_text: str) -> str:
@@ -132,12 +141,32 @@ def call_ollama(prompt: str, system_prompt: str) -> str:
     }
 
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=180)
+        response = requests.post(OLLAMA_URL, json=payload, timeout=600)
         response.raise_for_status()
         return response.json().get("response", "")
     except requests.exceptions.RequestException as e:
-        print(f"Error en llamada a Ollama: {e}")
+        print(f"Error en llamada a Ollama: {e}", flush=True)
         raise
+
+
+def log_pipeline_block(job_id: str, title: str, text: str) -> None:
+    """Imprime bloques largos del pipeline en terminal con truncado configurable."""
+    if not LOG_PIPELINE_TEXT:
+        return
+
+    clean_text = (text or "").strip()
+    if not clean_text:
+        clean_text = "<vacío>"
+
+    if len(clean_text) > LOG_MAX_CHARS:
+        clean_text = clean_text[:LOG_MAX_CHARS] + "\n...[truncado]"
+
+    separator = "=" * 72
+    print(f"\n[{job_id}] {separator}", flush=True)
+    print(f"[{job_id}] {title}", flush=True)
+    print(f"[{job_id}] {separator}", flush=True)
+    print(clean_text, flush=True)
+    print(f"[{job_id}] {separator}\n", flush=True)
 
 
 def build_timestamp_base_name() -> str:
@@ -196,50 +225,68 @@ def process_3d_generation(job_id: str, prompt: str):
         db.close()
         return
 
-    base_name = build_unique_timestamp_base_name()
-    py_filename = f"{base_name}_script.py"
-    step_filename = f"{base_name}.step"
-    stl_filename = f"{base_name}.stl"
+    script_filename = f"{job_id}_script.py"
+    step_filename = f"{job_id}.step"
+    stl_filename = f"{job_id}.stl"
 
     try:
         job.status = "processing"
         db.commit()
 
         # --- PIPELINE DE AGENTES ---
-        print(f"[{job_id}] Paso 1: Expandiendo concepto (Diseñador Industrial)...")
+        print(f"[{job_id}] Paso 1: Expandiendo concepto (Diseñador Industrial)...", flush=True)
+        log_pipeline_block(job_id, "Prompt inicial del usuario", prompt)
         design_description = call_ollama(prompt=prompt, system_prompt=SYSTEM_PROMPT_STEP_1)
+        log_pipeline_block(job_id, "Consigna generada - Paso 1 (diseño detallado)", design_description)
 
-        print(f"[{job_id}] Paso 2: Análisis geométrico (Analista Geométrico)...")
+        print(f"[{job_id}] Paso 2: Análisis geométrico (Analista Geométrico)...", flush=True)
         geometric_analysis = call_ollama(prompt=design_description, system_prompt=SYSTEM_PROMPT_STEP_2)
+        log_pipeline_block(job_id, "Consigna generada - Paso 2 (análisis geométrico)", geometric_analysis)
 
-        print(f"[{job_id}] Paso 3: Generando código Python (CadQuery)...")
+        print(f"[{job_id}] Paso 3: Generando código Python (CadQuery)...", flush=True)
 
         # Inyectamos los nombres de archivo exactos que la IA debe usar en las exportaciones
         prompt_paso_3 = (
             f"Especificación geométrica:\n{geometric_analysis}\n\n"
             f"REQUISITO FINAL: Debes exportar el modelo a '{step_filename}' y '{stl_filename}'."
         )
+        log_pipeline_block(job_id, "Consigna enviada al Paso 3 (generación CadQuery)", prompt_paso_3)
         raw_output = call_ollama(prompt=prompt_paso_3, system_prompt=SYSTEM_PROMPT_STEP_3)
+        log_pipeline_block(job_id, "Respuesta cruda del modelo en Paso 3", raw_output)
 
-        py_code = extract_code(raw_output)
+        # --- FIN DEL PIPELINE ---
+
+        # 1. Extraemos el código generado por la IA
+        python_code = extract_code(raw_output)
+        log_pipeline_block(job_id, "Código Python extraído para ejecución", python_code)
+
+        # 2. Definimos los nombres de los archivos basados en el ID del trabajo
+        step_filename = f"{job_id}.step"
+        stl_filename = f"{job_id}.stl"
+        script_filename = f"{job_id}_script.py"
 
         # --- VALIDACIÓN DE SEGURIDAD ---
-        if not is_safe_python_code(py_code):
+        if not is_safe_python_code(python_code):
             raise Exception("El código generado no pasó las verificaciones de seguridad.")
 
-        # Guardar el script Python
-        with open(py_filename, "w", encoding="utf-8") as f:
-            f.write(py_code)
+        # 3. INYECCIÓN CRÍTICA: Creamos las variables como código Python
+        injected_header = f"""# Variables inyectadas por el backend
+step_filename = \"{step_filename}\"
+stl_filename = \"{stl_filename}\"
+"""
 
-        # --- EJECUCIÓN DEL SCRIPT (usando WSL) ---
-        print(f"[{job_id}] Ejecutando script CadQuery en WSL...")
+        # 4. Unimos las variables inyectadas con el código de la IA
+        final_script_content = injected_header + "\n" + python_code
 
-        # Se asume que WSL tiene Python 3 instalado y el script se ejecuta desde el directorio actual
-        # (montado en /mnt/c/...). Ajusta la ruta si es necesario.
-        subprocess.run([sys.executable, py_filename], check=True, capture_output=True, text=True)
+        # 5. Guardamos el archivo listo para ejecutar
+        with open(script_filename, "w", encoding="utf-8") as f:
+            f.write(final_script_content)
 
+        # 6. Ejecutamos el script localmente
+        print(f"[{job_id}] Ejecutando script CadQuery...", flush=True)
+        subprocess.run([sys.executable, script_filename], check=True, capture_output=True, text=True)
         # --- SUBIDA A MINIO ---
-        print(f"[{job_id}] Subiendo modelos a almacenamiento (MinIO)...")
+        print(f"[{job_id}] Subiendo modelos a almacenamiento (MinIO)...", flush=True)
 
         if not os.path.exists(step_filename) or not os.path.exists(stl_filename):
             raise Exception("El script se ejecutó pero no generó todos los archivos esperados (.step y .stl).")
@@ -257,24 +304,24 @@ def process_3d_generation(job_id: str, prompt: str):
         # (El frontend deberá hacer un .split(","))
         job.file_url = f"{step_url},{stl_url}"
         db.commit()
-        print(f"✅ [{job_id}] Generación CadQuery completada con éxito!")
+        print(f"✅ [{job_id}] Generación CadQuery completada con éxito!", flush=True)
 
     except subprocess.CalledProcessError as e:
-        print(f"❌ Error ejecutando script CadQuery:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
+        print(f"❌ Error ejecutando script CadQuery:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}", flush=True)
         job.status = "failed"
         db.commit()
     except Exception as e:
-        print(f"❌ Error general en proceso: {e}")
+        print(f"❌ Error general en proceso: {e}", flush=True)
         job.status = "failed"
         db.commit()
     finally:
         db.close()
 
     # Limpieza exhaustiva de todos los archivos generados durante el ciclo
-    archivos_temporales = [py_filename, step_filename, stl_filename]
+    archivos_temporales = [script_filename, step_filename, stl_filename]
     for archivo in archivos_temporales:
         if os.path.exists(archivo):
             try:
                 os.remove(archivo)
             except Exception as ex:
-                print(f"No se pudo eliminar el archivo temporal {archivo}: {ex}")
+                print(f"No se pudo eliminar el archivo temporal {archivo}: {ex}", flush=True)
