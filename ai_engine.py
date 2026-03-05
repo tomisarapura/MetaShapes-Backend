@@ -2,7 +2,7 @@ import requests
 import subprocess
 import os
 import re
-import uuid
+import datetime
 import storage
 from database import SessionLocal
 import models
@@ -15,6 +15,14 @@ load_dotenv()
 # Busca la URL en el .env, si no la encuentra usa localhost por defecto
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 MODEL_NAME = "qwen2.5-coder:14b"
+
+
+def build_artifact_basename(created_at: datetime.datetime | None, job_id: str) -> str:
+    """Genera un nombre legible tipo YYYY-MM-DD_HH-MM con sufijo corto para evitar colisiones."""
+    base_dt = created_at or datetime.datetime.now()
+    timestamp = base_dt.strftime("%Y-%m-%d_%H-%M")
+    short_id = (job_id or "")[:8]
+    return f"{timestamp}_{short_id}" if short_id else timestamp
 
 # --- SYSTEM PROMPTS (PIPELINE DE 3 PASOS) ---
 SYSTEM_PROMPT_STEP_1 = """
@@ -167,8 +175,9 @@ def process_3d_generation(job_id: str, prompt: str):
         scad_code = extract_code(raw_output)
 
         # Guardar el código temporalmente
-        scad_filename = f"{job_id}.scad"
-        stl_filename = f"{job_id}.stl"
+        artifact_basename = build_artifact_basename(job.created_at, job_id)
+        scad_filename = f"{artifact_basename}.scad"
+        stl_filename = f"{artifact_basename}.stl"
 
         with open(scad_filename, "w", encoding="utf-8") as f:
             f.write(scad_code)
