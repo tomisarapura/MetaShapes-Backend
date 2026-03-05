@@ -225,9 +225,10 @@ def process_3d_generation(job_id: str, prompt: str):
         db.close()
         return
 
-    script_filename = f"{job_id}_script.py"
-    step_filename = f"{job_id}.step"
-    stl_filename = f"{job_id}.stl"
+    base_name = build_unique_timestamp_base_name()
+    script_filename = f"{base_name}_script.py"
+    step_filename = f"{base_name}.step"
+    stl_filename = f"{base_name}.stl"
 
     try:
         job.status = "processing"
@@ -260,10 +261,7 @@ def process_3d_generation(job_id: str, prompt: str):
         python_code = extract_code(raw_output)
         log_pipeline_block(job_id, "Código Python extraído para ejecución", python_code)
 
-        # 2. Definimos los nombres de los archivos basados en el ID del trabajo
-        step_filename = f"{job_id}.step"
-        stl_filename = f"{job_id}.stl"
-        script_filename = f"{job_id}_script.py"
+        # 2. Usamos nombres basados en timestamp (definidos al inicio del proceso)
 
         # --- VALIDACIÓN DE SEGURIDAD ---
         if not is_safe_python_code(python_code):
