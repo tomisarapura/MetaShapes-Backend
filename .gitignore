@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 venv/
 env/
+venv_linux/
 
 # Archivos de la base de datos local
 *.sqlite3
