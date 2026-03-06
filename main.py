@@ -3,8 +3,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from database import engine, get_db, Base
 import models
-import storage # <-- Importamos el módulo de almacenamiento
-import ai_engine # <-- Agregamos el motor de IA
+import storage
+import ai_engine 
+from typing import List 
 
 # Esto crea las tablas en la base de datos de Docker automáticamente al iniciar
 Base.metadata.create_all(bind=engine)
@@ -74,3 +75,10 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
         status=job.status,
         file_url=job.file_url
     )
+
+# <-- AGREGAR EL NUEVO ENDPOINT AQUÍ
+@app.get("/jobs", response_model=List[JobStatusResponse])
+def get_all_jobs(db: Session = Depends(get_db)):
+    # Devuelve todos los trabajos ordenados por el más reciente
+    jobs = db.query(models.GenerationJob).order_by(models.GenerationJob.created_at.desc()).all()
+    return jobs
