@@ -21,63 +21,55 @@ LOG_PIPELINE_TEXT = os.getenv("LOG_PIPELINE_TEXT", "true").lower() == "true"
 LOG_MAX_CHARS = int(os.getenv("LOG_MAX_CHARS", "12000"))
 
 # --- SYSTEM PROMPTS (PIPELINE DE 3 PASOS) ---
+# --- SYSTEM PROMPTS (PIPELINE DE 3 PASOS) ---
 SYSTEM_PROMPT_STEP_1 = """
-You are an expert Industrial Designer specializing in digital manufacturing (CNC and 3D Printing). 
-Your goal is to transform the user's idea into a rigorous engineering technical specification.
+You are an expert Industrial Designer. Deconstruct the user's prompt into a strict mechanical specification.
 
-For every design, you must:
-1. COMPONENT BREAKDOWN: Deconstruct the object into its primary volumes (boxes, cylinders, spheres, toroids).
-2. SPATIAL HIERARCHY: Define the "Base" part and specify which parts are "anchored" to or "subtracted" from it.
-3. SIZE RELATIONS: If specific measurements are missing, assign realistic dimensions in millimeters based on the object's intended use.
-4. FINISHING DETAILS: Specify if edges should be rounded (fillets) or angled (chamfers) to improve ergonomics or structural integrity.
+CRITICAL RULE: DO NOT add extra components (like tables, legs, or handles) unless the user explicitly asks for them. Build ONLY what is requested.
 
-Provide a structured technical description focused purely on form and function. Do not generate code.
+Output a structured report with:
+1. OVERALL DIMENSIONS: (Bounding box).
+2. COMPONENT LIST: Name every geometric primitive (e.g., "Main Body: Cylinder", "Inner Cutout: Cylinder").
+3. EXACT SIZES: Provide realistic dimensions in mm for EVERY component.
+4. RELATIVE POSITIONS: Explain exactly where components attach or overlap.
 """
 
 SYSTEM_PROMPT_STEP_2 = """
-You are an expert Geometric CAD Analyst. Your task is to translate an industrial design description into a rigorous mathematical construction plan.
+You are a Geometric Planner. Convert the industrial design into a strict coordinate system map.
+Origin (0,0,0) is the center of mass of the primary base object.
 
-MANDATORY RULES:
-- ORIGIN POINT: Define the center of the base part at (0, 0, 0).
-- PRIMITIVE TABLE: For each part, list:
-    - Shape (Box, Cylinder, Sphere, etc.).
-    - Exact Dimensions (Length, Width, Height or Radius, Height) in mm.
-    - Relative Position: Center-of-mass coordinates (X, Y, Z).
-    - Rotation: Angles in degrees if applicable.
-- BOOLEAN LOGIC: Explicitly state which parts are JOINED (union) and which are SUBTRACTED (cut).
-- FACE REFERENCING: If a part is built on another, specify the reference face (e.g., "on the top face (+Z) of the Base").
+CRITICAL RULE: ALL dimensions and coordinates MUST be in millimeters (mm) ONLY. Convert cm to mm (e.g., 14 cm = 140 mm).
 
-Do not write unnecessary prose. Deliver a technical list of construction steps.
+For EVERY object, output a line with:
+- Part Name
+- Primitive Type (Box, Cylinder, Sphere)
+- Dimensions (X, Y, Z or Radius, Height) in mm
+- Translation Coordinates from Origin (Tx, Ty, Tz) in mm
+- Boolean Operation (Base, Union, Cut)
+
+Output ONLY the technical list. Do not use conversational text.
 """
 
 SYSTEM_PROMPT_STEP_3 = """
-You are a senior Python developer, an expert in CadQuery and 3D parametric design. 
-Your sole mission is to translate the received geometric planning into a valid, robust, and executable Python script using CadQuery.
+You are an expert CadQuery (Python) developer. Write code to build the 3D model based on the geometric plan.
 
-CRITICAL TECHNICAL RULES (TO AVOID ERRORS AND CRASHES):
-1) INDEPENDENT SOLIDS & SAFE FILLETS:
-   - Create each part as an independent solid.
-   - Apply fillets IMMEDIATELY at creation, NEVER after a boolean operation (.union() or .cut()). 
-   - Correct: `base = cq.Workplane("XY").box(100, 50, 10).edges().fillet(2)`
-   - Fatal Error (Causes ChFi3d_Builder crash): `base = base.cut(leg); base.edges().fillet(2)`
+STRICT RULES:
+1. DO NOT import cadquery. It is already imported as `cq`.
+2. You MUST assign the final geometric object to a variable named EXACTLY `result`.
+3. Build robust shapes using CadQuery fluent API.
+4. ALWAYS apply `.translate((x, y, z))` to position parts BEFORE combining them.
+5. Combine parts using `.union()` or `.cut()`.
+6. To apply a fillet to a cylinder, use ONLY `.edges().fillet(radius)` without any string selectors inside the parentheses.
 
-2) CYLINDER EDGES (CRITICAL):
-   - NEVER use string selectors like `.edges("|Z")`, `.edges(">Z")`, or `.edges("|-Z")` on cylinders. Cylinders lack vertical edges, causing "no suitable edges" crashes.
-   - To fillet a cylinder, use ONLY `.edges().fillet(radius)` without string selectors.
-
-3) FILLET RADIUS LIMITS:
-   - NEVER apply a fillet radius equal to or larger than half the smallest dimension (thickness) of the solid.
-
-4) EXPLICIT TRANSFORMATIONS BEFORE BOOLEANS:
-   - Position solids with `.translate((x,y,z))` before applying `.union()` or `.cut()`.
-   - Apply boolean operations only between 3D solids.
-
-5) EXPORT WITH LITERAL STRINGS:
-   - Use the EXACT literal strings given in the prompt for export filenames. Do not invent variable names.
-   - Example: `cq.exporters.export(final_model, 'exact_name.step')`
-
-OUTPUT STYLE:
-- Return ONLY the Python code within a ```python ... ``` block. No explanations or prose.
+EXAMPLE OUTPUT:
+```python
+# Main Body
+main_body = cq.Workplane("XY").cylinder(50, 100)
+# Inner Cut
+hole = cq.Workplane("XY").cylinder(40, 100).translate((0, 0, 10))
+# Combine
+result = main_body.cut(hole)
+OUTPUT ONLY PYTHON CODE inside python  blocks.
 """
 
 def extract_code(response_text: str) -> str:
@@ -242,10 +234,9 @@ def process_3d_generation(job_id: str, prompt: str):
 
         print(f"[{job_id}] Paso 3: Generando código Python (CadQuery)...", flush=True)
 
-        # Inyectamos los nombres de archivo exactos que la IA debe usar en las exportaciones
         prompt_paso_3 = (
             f"Especificación geométrica:\n{geometric_analysis}\n\n"
-            f"REQUISITO FINAL: Debes exportar el modelo a '{step_filename}' y '{stl_filename}'."
+            f"REQUISITO FINAL: Genera el código asignando el modelo final a la variable 'result'."
         )
         log_pipeline_block(job_id, "Consigna enviada al Paso 3 (generación CadQuery)", prompt_paso_3)
         raw_output = call_ollama(prompt=prompt_paso_3, system_prompt=SYSTEM_PROMPT_STEP_3)
@@ -257,28 +248,24 @@ def process_3d_generation(job_id: str, prompt: str):
         python_code = extract_code(raw_output)
         log_pipeline_block(job_id, "Código Python extraído para ejecución", python_code)
 
-        # 2. Usamos nombres basados en timestamp (definidos al inicio del proceso)
-
-        # --- VALIDACIÓN DE SEGURIDAD ---
         if not is_safe_python_code(python_code):
             raise Exception("El código generado no pasó las verificaciones de seguridad.")
 
-        # 3. INYECCIÓN CRÍTICA: Creamos las variables como código Python
-        injected_header = f"""# Variables inyectadas por el backend
-step_filename = \"{step_filename}\"
-stl_filename = \"{stl_filename}\"
-"""
+        # 3. INYECCIÓN CRÍTICA: Controlamos el entorno (En una sola línea para evitar errores de Indentación)
+        injected_header = "import cadquery as cq\nimport math\n# --- CÓDIGO GENERADO POR IA ---\n"
+        injected_footer = f"\n# --- EXPORTACIÓN AUTOMÁTICA ---\nif 'result' not in locals():\n    raise ValueError('El script no definio result.')\ncq.exporters.export(result, '{step_filename}')\ncq.exporters.export(result, '{stl_filename}')\n"
 
         # 4. Unimos las variables inyectadas con el código de la IA
-        final_script_content = injected_header + "\n" + python_code
+        final_script_content = injected_header + python_code + injected_footer
 
         # 5. Guardamos el archivo listo para ejecutar
         with open(script_filename, "w", encoding="utf-8") as f:
             f.write(final_script_content)
 
-        # 6. Ejecutamos el script localmente
+        # 6. Ejecutamos el script localmente CON TIMEOUT (Evita que bucles infinitos cuelguen el backend)
         print(f"[{job_id}] Ejecutando script CadQuery...", flush=True)
-        subprocess.run([sys.executable, script_filename], check=True, capture_output=True, text=True)
+        subprocess.run([sys.executable, script_filename], check=True, capture_output=True, text=True, timeout=45)
+        
         # --- SUBIDA A MINIO ---
         print(f"[{job_id}] Subiendo modelos a almacenamiento (MinIO)...", flush=True)
 
@@ -293,9 +280,6 @@ stl_filename = \"{stl_filename}\"
 
         # Actualizamos la base de datos
         job.status = "completed"
-
-        # Guardamos ambas URLs separadas por coma en la base de datos
-        # (El frontend deberá hacer un .split(","))
         job.file_url = f"{step_url},{stl_url}"
         db.commit()
         print(f"✅ [{job_id}] Generación CadQuery completada con éxito!", flush=True)
