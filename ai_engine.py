@@ -4,6 +4,7 @@ import os
 import re
 import ast
 import sys
+import importlib
 from datetime import datetime
 from botocore.exceptions import ClientError
 import storage
@@ -15,173 +16,170 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- CONFIGURACIÓN ---
+AI_PROVIDER = os.getenv("AI_PROVIDER", "ollama").lower()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
-MODEL_NAME = "qwen2.5-coder:14b"
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5-coder:14b")
+
 LOG_PIPELINE_TEXT = os.getenv("LOG_PIPELINE_TEXT", "true").lower() == "true"
 LOG_MAX_CHARS = int(os.getenv("LOG_MAX_CHARS", "12000"))
 
 # --- SYSTEM PROMPTS (PIPELINE DE 3 PASOS) ---
 SYSTEM_PROMPT_STEP_1 = """
-You are an expert Industrial Designer specializing in digital manufacturing (CNC and 3D Printing). 
-Your goal is to transform the user's idea into a rigorous engineering technical specification.
+You are an expert Industrial Designer. Deconstruct the user's prompt into a strict mechanical specification.
 
-For every design, you must:
-1. COMPONENT BREAKDOWN: Deconstruct the object into its primary volumes (boxes, cylinders, spheres, toroids).
-2. SPATIAL HIERARCHY: Define the "Base" part and specify which parts are "anchored" to or "subtracted" from it.
-3. SIZE RELATIONS: If specific measurements are missing, assign realistic dimensions in millimeters based on the object's intended use.
-4. FINISHING DETAILS: Specify if edges should be rounded (fillets) or angled (chamfers) to improve ergonomics or structural integrity.
+CRITICAL RULE: DO NOT add extra components unless the user explicitly asks for them. Build ONLY what is requested.
 
-Provide a structured technical description focused purely on form and function. Do not generate code.
+Output a structured report with:
+1. OVERALL DIMENSIONS: (Bounding box).
+2. COMPONENT LIST: Name every mechanical part (e.g., Gear, Hex Nut, L-Bracket, Shaft).
+3. EXACT SIZES: Provide realistic dimensions in mm.
+4. SHAPE DETAILS: Describe the geometry. If it requires 2D profiles (like a hex shape or L-bracket), specify the 2D dimensions to extrude. Mention if standard threads, gears, or specific holes are needed.
 """
 
 SYSTEM_PROMPT_STEP_2 = """
-You are an expert Geometric CAD Analyst. Your task is to translate an industrial design description into a rigorous mathematical construction plan.
+You are a Geometric Planner. Convert the industrial design into a logical sequence of CadQuery operations.
+Origin (0,0,0) is the center of mass of the primary base object.
 
-MANDATORY RULES:
-- ORIGIN POINT: Define the center of the base part at (0, 0, 0).
-- PRIMITIVE TABLE: For each part, list:
-    - Shape (Box, Cylinder, Sphere, etc.).
-    - Exact Dimensions (Length, Width, Height or Radius, Height) in mm.
-    - Relative Position: Center-of-mass coordinates (X, Y, Z).
-    - Rotation: Angles in degrees if applicable.
-- BOOLEAN LOGIC: Explicitly state which parts are JOINED (union) and which are SUBTRACTED (cut).
-- FACE REFERENCING: If a part is built on another, specify the reference face (e.g., "on the top face (+Z) of the Base").
+CRITICAL RULES:
+- ALL dimensions MUST be in millimeters (mm).
+- Plan for 2D sketches that are extruded (e.g., L-shapes, polygons for hex shapes) instead of just stacking 3D primitives.
+- Plan for cuts using .hole() for center holes.
+- If the part is a standard Gear or Hex Nut, explicitly plan to use the custom macros `create_gear` or `create_hex_nut`.
 
-Do not write unnecessary prose. Deliver a technical list of construction steps.
+Output a technical list of steps:
+- Part Name
+- Operation Type (Extrude 2D Profile, Primitive 3D, Hole Cut, Custom Macro)
+- Dimensions (Radius, Height, X/Y/Z)
+- Translation (Tx, Ty, Tz)
+- Boolean Operation (Base, Union, Cut)
 """
 
 SYSTEM_PROMPT_STEP_3 = """
-You are a senior Python developer, an expert in CadQuery and 3D parametric design. 
-Your sole mission is to translate the received geometric planning into a valid, robust, and executable Python script using CadQuery.
+You are an expert CadQuery (Python) developer. Write code to build the 3D model based on the geometric plan.
 
-CRITICAL TECHNICAL RULES (TO AVOID ERRORS AND CRASHES):
-1) INDEPENDENT SOLIDS:
-   - Create each part as an independent 3D solid: p1 = cq.Workplane("XY").box(...), p2 = cq.Workplane("XY").cylinder(...), etc.
-   - Do not chain a long flow of operations on a single Workplane; use variables for each part.
+STRICT RULES:
+1. DO NOT import cadquery or math. They are already imported.
+2. Assign the final geometric object to a variable named EXACTLY `result`.
+3. Combine parts using `.union()` or `.cut()`.
 
-2) EXPLICIT FORMAT PRIMITIVES:
-   - Always use the full format for primitives:
-     * cq.Workplane("XY").box(x, y, z)
-     * cq.Workplane("XY").cylinder(height, radius)
-     * cq.Workplane("XY").sphere(radius)
+CADQUERY CHEAT SHEET:
+- 2D Sketching & Extrusion (Best for brackets/profiles): `cq.Workplane("XY").rect(50, 50).extrude(10)`
+- Polygons (For Hex shapes): `cq.Workplane("XY").polygon(6, diameter).extrude(thickness)`
+- Holes (Cuts through): `object.faces(">Z").workplane().hole(diameter)`
+- Primitives: `cq.Workplane("XY").cylinder(radius=25, height=100, centered=(True, True, False))`
 
-3) EXPLICIT TRANSFORMATIONS BEFORE BOOLEANS:
-   - Position each solid with .translate((x, y, z)) and/or .rotate((ax, ay, az), (vx, vy, vz), angle) before any .union(), .cut(), or .intersect().
+CUSTOM MACROS AVAILABLE (Use these if requested):
+- `create_gear(teeth, diameter, thickness)` -> returns a CadQuery object.
+- `create_hex_nut(size_m, thickness)` -> returns a CadQuery object.
 
-4) BOOLEAN OPERATIONS ONLY BETWEEN SOLIDS:
-   - Apply .union(), .cut(), or .intersect() only to 3D SOLIDS.
-   - NEVER apply boolean operations to an empty Workplane or an un-extruded 2D sketch.
-   - For unions: final_model = part_a.union(part_b)
-   - For cuts:   final_model = final_model.cut(part_c)
+Positioning: Use `.translate((x, y, z))` to align parts before combining them.
 
-5) PROGRESSIVE ASSEMBLY:
-   - Create and position all parts first.
-   - Assemble with secure unions (in the necessary order).
-   - Create cutting solids as independent bodies and apply them afterward.
-
-6) MANDATORY EXPORT:
-   - Use the environment-injected variables: step_filename and stl_filename.
-   - At the end of the script, export with:
-     cq.exporters.export(final_model, step_filename)
-     cq.exporters.export(final_model, stl_filename)
-
-OUTPUT STYLE:
-- Return ONLY the Python code within a ```python ... ``` block.
-- No explanations, no prose, and no comments outside the code. The script must be self-contained.
-
-IDEAL STRUCTURE EXAMPLE:
+EXAMPLE OUTPUT:
 ```python
-import cadquery as cq
-
-# Parameters (modify as needed)
-base_x, base_y, base_z = 50, 50, 10
-cyl_radius, cyl_height = 15, 20
-hole_radius = 5
-
-# 1) Independent parts (3D solids)
-base = cq.Workplane("XY").box(base_x, base_y, base_z)
-cylinder = cq.Workplane("XY").cylinder(cyl_height, cyl_radius)
-
-# 2) Positioning before booleans
-cylinder = cylinder.translate((0, 0, base_z/2 + cyl_height/2))
-
-# 3) Assembly (secure unions between solids)
-final_model = base.union(cylinder)
-
-# 4) Cutting solids
-hole = cq.Workplane("XY").cylinder(base_z + cyl_height + 10, hole_radius)
-
-# 5) Apply cuts
-final_model = final_model.cut(hole)
-
-# 6) Export (step_filename and stl_filename already exist in the environment)
-cq.exporters.export(final_model, step_filename)
-cq.exporters.export(final_model, stl_filename)
+# Hexagonal base with a center hole
+base = cq.Workplane("XY").polygon(6, 60).extrude(20)
+result = base.faces(">Z").workplane().hole(10)
+OUTPUT ONLY PYTHON CODE inside python blocks.
 """
+
 
 def extract_code(response_text: str) -> str:
     """Limpia la respuesta de la IA para extraer el código Python."""
-    match = re.search(r"```python\n(.*?)```", response_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    fenced_match = re.search(r"```python\s*(.*?)```", response_text, re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        return fenced_match.group(1).strip()
     return response_text.strip()
 
-def is_safe_python_code(code_str: str) -> bool:
+
+def validate_cadquery_code(code_str: str) -> tuple[bool, str]:
     """
-    Analiza el AST (Abstract Syntax Tree) para bloquear importaciones
-    maliciosas y el uso de funciones integradas peligrosas.
+    Analiza el AST (Abstract Syntax Tree) para validar el código.
+    Verifica errores de sintaxis, bloquea imports maliciosos y asegura
+    que el resultado final se guarde en la variable 'result'.
     """
-    forbidden_modules = {'os', 'sys', 'subprocess', 'shutil', 'socket', 'requests', 'pathlib'}
-    forbidden_functions = {'eval', 'exec', 'open', 'compile', 'import'}
+    forbidden_modules = {"os", "sys", "subprocess", "shutil", "socket", "requests", "pathlib"}
+    forbidden_functions = {"eval", "exec", "open", "compile", "import"}
 
     try:
         tree = ast.parse(code_str)
     except SyntaxError as e:
-        print(f"Error de sintaxis en el código generado por IA: {e}")
-        return False
+        return False, f"Error de sintaxis de Python: {e}"
+
+    has_result_assignment = False
 
     for node in ast.walk(tree):
         # Verifica imports simples (ej: import os)
         if isinstance(node, ast.Import):
             for alias in node.names:
-                base_module = alias.name.split('.')[0]
+                base_module = alias.name.split(".")[0]
                 if base_module in forbidden_modules:
-                    print(f"Bloqueo de seguridad: Importación prohibida detectada ({alias.name})")
-                    return False
+                    return False, f"Importación de seguridad prohibida detectada ({alias.name})"
 
         # Verifica imports desde módulos (ej: from os import system)
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                base_module = node.module.split('.')[0]
+                base_module = node.module.split(".")[0]
                 if base_module in forbidden_modules:
-                    print(f"Bloqueo de seguridad: Importación 'from' prohibida ({node.module})")
-                    return False
+                    return False, f"Importación 'from' prohibida ({node.module})"
 
         # Verifica llamadas a funciones peligrosas
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name):
-                if node.func.id in forbidden_functions:
-                    print(f"Bloqueo de seguridad: Función prohibida detectada ({node.func.id})")
-                    return False
+            if isinstance(node.func, ast.Name) and node.func.id in forbidden_functions:
+                return False, f"Función prohibida detectada ({node.func.id})"
 
-    return True
+        # Verifica que exista una asignación a la variable 'result'
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "result":
+                    has_result_assignment = True
 
-def call_ollama(prompt: str, system_prompt: str) -> str:
-    """Función auxiliar para encapsular la llamada a la API de Ollama."""
-    payload = {
-        "model": MODEL_NAME,
-        "system": system_prompt,
-        "prompt": prompt,
-        "stream": False
-    }
+    if not has_result_assignment:
+        return (
+            False,
+            "No se encontró la asignación obligatoria a la variable 'result'. El código debe terminar asignando el modelo final a 'result'.",
+        )
 
-    try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=600)
-        response.raise_for_status()
-        return response.json().get("response", "")
-    except requests.exceptions.RequestException as e:
-        print(f"Error en llamada a Ollama: {e}", flush=True)
-        raise
+    return True, ""
+
+
+def call_llm(prompt: str, system_prompt: str) -> str:
+    """Llama a la API de Ollama o a Groq dependiendo de la configuración."""
+    if AI_PROVIDER == "groq":
+        try:
+            openai_module = importlib.import_module("openai")
+            OpenAI = getattr(openai_module, "OpenAI")
+
+            client = OpenAI(
+                api_key=GROQ_API_KEY,
+                base_url="https://api.groq.com/openai/v1",
+            )
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Error en llamada a Groq: {e}", flush=True)
+            raise
+    else:
+        payload = {
+            "model": MODEL_NAME,
+            "system": system_prompt,
+            "prompt": prompt,
+            "stream": False,
+        }
+        try:
+            response = requests.post(OLLAMA_URL, json=payload, timeout=600)
+            response.raise_for_status()
+            return response.json().get("response", "")
+        except requests.exceptions.RequestException as e:
+            print(f"Error en llamada a Ollama: {e}", flush=True)
+            raise
 
 
 def log_pipeline_block(job_id: str, title: str, text: str) -> None:
@@ -247,6 +245,7 @@ def build_unique_timestamp_base_name() -> str:
 
         suffix += 1
 
+
 def process_3d_generation(job_id: str, prompt: str):
     """
     Orquesta el pipeline de agentes en cascada, ejecuta el código CadQuery
@@ -272,52 +271,85 @@ def process_3d_generation(job_id: str, prompt: str):
         # --- PIPELINE DE AGENTES ---
         print(f"[{job_id}] Paso 1: Expandiendo concepto (Diseñador Industrial)...", flush=True)
         log_pipeline_block(job_id, "Prompt inicial del usuario", prompt)
-        design_description = call_ollama(prompt=prompt, system_prompt=SYSTEM_PROMPT_STEP_1)
+        design_description = call_llm(prompt=prompt, system_prompt=SYSTEM_PROMPT_STEP_1)
         log_pipeline_block(job_id, "Consigna generada - Paso 1 (diseño detallado)", design_description)
 
         print(f"[{job_id}] Paso 2: Análisis geométrico (Analista Geométrico)...", flush=True)
-        geometric_analysis = call_ollama(prompt=design_description, system_prompt=SYSTEM_PROMPT_STEP_2)
+        geometric_analysis = call_llm(prompt=design_description, system_prompt=SYSTEM_PROMPT_STEP_2)
         log_pipeline_block(job_id, "Consigna generada - Paso 2 (análisis geométrico)", geometric_analysis)
 
         print(f"[{job_id}] Paso 3: Generando código Python (CadQuery)...", flush=True)
 
-        # Inyectamos los nombres de archivo exactos que la IA debe usar en las exportaciones
         prompt_paso_3 = (
             f"Especificación geométrica:\n{geometric_analysis}\n\n"
-            f"REQUISITO FINAL: Debes exportar el modelo a '{step_filename}' y '{stl_filename}'."
+            f"REQUISITO FINAL: Genera el código asignando el modelo final a la variable 'result'."
         )
         log_pipeline_block(job_id, "Consigna enviada al Paso 3 (generación CadQuery)", prompt_paso_3)
-        raw_output = call_ollama(prompt=prompt_paso_3, system_prompt=SYSTEM_PROMPT_STEP_3)
-        log_pipeline_block(job_id, "Respuesta cruda del modelo en Paso 3", raw_output)
+
+        # --- VALIDACIÓN Y REINTENTOS ---
+        max_retries = 3
+        python_code = ""
+        current_prompt = prompt_paso_3
+
+        for attempt in range(max_retries):
+            raw_output = call_llm(prompt=current_prompt, system_prompt=SYSTEM_PROMPT_STEP_3)
+            log_pipeline_block(job_id, f"Respuesta cruda del modelo en Paso 3 (Intento {attempt + 1})", raw_output)
+
+            python_code = extract_code(raw_output)
+
+            # Validación robusta de AST y reglas de negocio
+            is_valid, error_msg = validate_cadquery_code(python_code)
+
+            if is_valid:
+                log_pipeline_block(job_id, "Código Python extraído y validado", python_code)
+                break
+
+            print(f"[{job_id}] Validación fallida en intento {attempt + 1}: {error_msg}", flush=True)
+            if attempt < max_retries - 1:
+                # Retroalimentamos al modelo con su propio error
+                current_prompt = (
+                    f"{prompt_paso_3}\n\n"
+                    f"El código que generaste anteriormente falló la validación con este error:\n"
+                    f"{error_msg}\n"
+                    "Por favor, analiza el error, corrígelo y genera una versión que funcione."
+                )
+        else:
+            # Si agota los intentos y no hay código válido
+            raise Exception(
+                f"No se pudo generar un código válido tras {max_retries} intentos. Último error: {error_msg}"
+            )
 
         # --- FIN DEL PIPELINE ---
 
-        # 1. Extraemos el código generado por la IA
-        python_code = extract_code(raw_output)
-        log_pipeline_block(job_id, "Código Python extraído para ejecución", python_code)
+       # En ai_engine.py, modifica el injected_header:
+        injected_header = (
+            "import cadquery as cq\n"
+            "import math\n\n"
+            "# --- HERRAMIENTAS MECANICAS PREDEFINIDAS ---\n"
+            "def create_gear(teeth, diameter, thickness):\n"
+            "    # Placeholder: En el futuro puedes usar el plugin cq-gears aquí\n"
+            "    return cq.Workplane('XY').cylinder(thickness, diameter / 2)\n\n"
+            "def create_hex_nut(size_m, thickness):\n"
+            "    nut = cq.Workplane('XY').polygon(6, size_m * 1.8).extrude(thickness)\n"
+            "    return nut.faces('>Z').workplane().hole(size_m)\n\n"
+            "# --- CODIGO GENERADO POR IA ---\n"
+        )
+        injected_footer = (
+            "\n# --- EXPORTACION AUTOMATICA ---\n"
+            "if 'result' not in locals():\n"
+            "    raise ValueError('El script no definio result.')\n"
+            f"cq.exporters.export(result, '{step_filename}')\n"
+            f"cq.exporters.export(result, '{stl_filename}')\n"
+        )
 
-        # 2. Usamos nombres basados en timestamp (definidos al inicio del proceso)
+        final_script_content = injected_header + python_code + injected_footer
 
-        # --- VALIDACIÓN DE SEGURIDAD ---
-        if not is_safe_python_code(python_code):
-            raise Exception("El código generado no pasó las verificaciones de seguridad.")
+        with open(script_filename, "w", encoding="utf-8") as file:
+            file.write(final_script_content)
 
-        # 3. INYECCIÓN CRÍTICA: Creamos las variables como código Python
-        injected_header = f"""# Variables inyectadas por el backend
-step_filename = \"{step_filename}\"
-stl_filename = \"{stl_filename}\"
-"""
-
-        # 4. Unimos las variables inyectadas con el código de la IA
-        final_script_content = injected_header + "\n" + python_code
-
-        # 5. Guardamos el archivo listo para ejecutar
-        with open(script_filename, "w", encoding="utf-8") as f:
-            f.write(final_script_content)
-
-        # 6. Ejecutamos el script localmente
         print(f"[{job_id}] Ejecutando script CadQuery...", flush=True)
-        subprocess.run([sys.executable, script_filename], check=True, capture_output=True, text=True)
+        subprocess.run([sys.executable, script_filename], check=True, capture_output=True, text=True, timeout=45)
+
         # --- SUBIDA A MINIO ---
         print(f"[{job_id}] Subiendo modelos a almacenamiento (MinIO)...", flush=True)
 
@@ -332,29 +364,26 @@ stl_filename = \"{stl_filename}\"
 
         # Actualizamos la base de datos
         job.status = "completed"
-
-        # Guardamos ambas URLs separadas por coma en la base de datos
-        # (El frontend deberá hacer un .split(","))
         job.file_url = f"{step_url},{stl_url}"
         db.commit()
-        print(f"✅ [{job_id}] Generación CadQuery completada con éxito!", flush=True)
+        print(f"[{job_id}] Generacion CadQuery completada con exito!", flush=True)
 
     except subprocess.CalledProcessError as e:
-        print(f"❌ Error ejecutando script CadQuery:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}", flush=True)
+        print(f"Error ejecutando script CadQuery:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}", flush=True)
         job.status = "failed"
         db.commit()
     except Exception as e:
-        print(f"❌ Error general en proceso: {e}", flush=True)
+        print(f"Error general en proceso: {e}", flush=True)
         job.status = "failed"
         db.commit()
     finally:
         db.close()
 
-    # Limpieza exhaustiva de todos los archivos generados durante el ciclo
-    archivos_temporales = [script_filename, step_filename, stl_filename]
-    for archivo in archivos_temporales:
-        if os.path.exists(archivo):
-            try:
-                os.remove(archivo)
-            except Exception as ex:
-                print(f"No se pudo eliminar el archivo temporal {archivo}: {ex}", flush=True)
+        # Limpieza exhaustiva de todos los archivos generados durante el ciclo
+        archivos_temporales = [script_filename, step_filename, stl_filename]
+        for archivo in archivos_temporales:
+            if os.path.exists(archivo):
+                try:
+                    os.remove(archivo)
+                except Exception as ex:
+                    print(f"No se pudo eliminar el archivo temporal {archivo}: {ex}", flush=True)

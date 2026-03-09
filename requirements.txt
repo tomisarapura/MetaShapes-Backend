@@ -1,0 +1,20 @@
+# Web Framework y Servidor
+fastapi
+uvicorn
+
+# Base de datos (PostgreSQL + SQLAlchemy)
+sqlalchemy
+psycopg2-binary
+
+# Almacenamiento S3 (MinIO)
+boto3
+
+# Integración con IAs (Ollama y Groq)
+requests
+openai
+
+# Variables de entorno
+python-dotenv
+
+# Motor 3D
+cadquery
