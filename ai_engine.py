@@ -32,57 +32,54 @@ CRITICAL RULE: DO NOT add extra components unless the user explicitly asks for t
 
 Output a structured report with:
 1. OVERALL DIMENSIONS: (Bounding box).
-2. COMPONENT LIST: Name every geometric part.
-3. EXACT SIZES: Provide realistic dimensions in mm for EVERY component.
-4. SHAPE DETAILS: Specifically mention if a shape is a Cylinder, Box, Sphere, Cone, or a Truncated Cone (Frustum).
+2. COMPONENT LIST: Name every mechanical part (e.g., Gear, Hex Nut, L-Bracket, Shaft).
+3. EXACT SIZES: Provide realistic dimensions in mm.
+4. SHAPE DETAILS: Describe the geometry. If it requires 2D profiles (like a hex shape or L-bracket), specify the 2D dimensions to extrude. Mention if standard threads, gears, or specific holes are needed.
 """
 
 SYSTEM_PROMPT_STEP_2 = """
-You are a Geometric Planner. Convert the industrial design into a strict coordinate system map.
+You are a Geometric Planner. Convert the industrial design into a logical sequence of CadQuery operations.
 Origin (0,0,0) is the center of mass of the primary base object.
 
-CRITICAL RULES FOR Z-MATH (ASSEMBLY):
-- You MUST ensure parts physically touch. 
-- If Part A sits exactly on top of Part B, Part A's bottom Z coordinate must perfectly match Part B's top Z coordinate.
-- ALL dimensions and coordinates MUST be in millimeters (mm). Convert cm to mm.
+CRITICAL RULES:
+- ALL dimensions MUST be in millimeters (mm).
+- Plan for 2D sketches that are extruded (e.g., L-shapes, polygons for hex shapes) instead of just stacking 3D primitives.
+- Plan for cuts using .hole() for center holes.
+- If the part is a standard Gear or Hex Nut, explicitly plan to use the custom macros `create_gear` or `create_hex_nut`.
 
-For EVERY object, output a line with:
+Output a technical list of steps:
 - Part Name
-- Primitive Type (Box, Cylinder, Sphere, Cone, TruncatedCone)
-- Dimensions (X,Y,Z or Radius,Height) in mm
-- Translation Coordinates from Origin (Tx, Ty, Tz) in mm. (Assume these coordinates represent the BASE / BOTTOM CENTER of the object, NOT the center of mass).
+- Operation Type (Extrude 2D Profile, Primitive 3D, Hole Cut, Custom Macro)
+- Dimensions (Radius, Height, X/Y/Z)
+- Translation (Tx, Ty, Tz)
 - Boolean Operation (Base, Union, Cut)
-
-Output ONLY the technical list. Do not use conversational text.
 """
 
 SYSTEM_PROMPT_STEP_3 = """
 You are an expert CadQuery (Python) developer. Write code to build the 3D model based on the geometric plan.
 
 STRICT RULES:
-1. DO NOT import cadquery. It is already imported as `cq`.
-2. You MUST assign the final geometric object to a variable named EXACTLY `result`.
+1. DO NOT import cadquery or math. They are already imported.
+2. Assign the final geometric object to a variable named EXACTLY `result`.
 3. Combine parts using `.union()` or `.cut()`.
 
-CADQUERY CHEAT SHEET (CRITICAL FOR POSITIONING):
-- By default, `.box()` and `.cylinder()` center the object in X, Y, and Z. 
-- To make math easier and extrude UPWARDS from the workplane (Z=0) just like the geometric plan specifies, ALWAYS use `centered=(True, True, False)`.
-  Example: `cq.Workplane("XY").box(100, 100, 50, centered=(True, True, False))`
-  Example: `cq.Workplane("XY").cylinder(radius=25, height=100, centered=(True, True, False))`
-- Truncated Cone (Frustum): Use lofting. Example:
-  `cq.Workplane("XY").workplane(offset=0).circle(bottom_radius).workplane(offset=height).circle(top_radius).loft()`
-- Shelling/Hollowing: `cq.Workplane("XY").cylinder(r, h, centered=(True, True, False)).faces(">Z").shell(-thickness)`
+CADQUERY CHEAT SHEET:
+- 2D Sketching & Extrusion (Best for brackets/profiles): `cq.Workplane("XY").rect(50, 50).extrude(10)`
+- Polygons (For Hex shapes): `cq.Workplane("XY").polygon(6, diameter).extrude(thickness)`
+- Holes (Cuts through): `object.faces(">Z").workplane().hole(diameter)`
+- Primitives: `cq.Workplane("XY").cylinder(radius=25, height=100, centered=(True, True, False))`
 
-When translating, use `.translate((x, y, z))`. Ensure that the Z translation accurately stacks parts on top of each other.
+CUSTOM MACROS AVAILABLE (Use these if requested):
+- `create_gear(teeth, diameter, thickness)` -> returns a CadQuery object.
+- `create_hex_nut(size_m, thickness)` -> returns a CadQuery object.
+
+Positioning: Use `.translate((x, y, z))` to align parts before combining them.
 
 EXAMPLE OUTPUT:
 ```python
-# Table Top
-table_top = cq.Workplane("XY").box(1000, 500, 30, centered=(True, True, False)).translate((0, 0, 700))
-# Leg
-leg = cq.Workplane("XY").cylinder(radius=25, height=700, centered=(True, True, False)).translate((400, 200, 0))
-# Combine
-result = table_top.union(leg)
+# Hexagonal base with a center hole
+base = cq.Workplane("XY").polygon(6, 60).extrude(20)
+result = base.faces(">Z").workplane().hole(10)
 OUTPUT ONLY PYTHON CODE inside python blocks.
 """
 
@@ -324,7 +321,19 @@ def process_3d_generation(job_id: str, prompt: str):
 
         # --- FIN DEL PIPELINE ---
 
-        injected_header = "import cadquery as cq\nimport math\n# --- CODIGO GENERADO POR IA ---\n"
+       # En ai_engine.py, modifica el injected_header:
+        injected_header = (
+            "import cadquery as cq\n"
+            "import math\n\n"
+            "# --- HERRAMIENTAS MECANICAS PREDEFINIDAS ---\n"
+            "def create_gear(teeth, diameter, thickness):\n"
+            "    # Placeholder: En el futuro puedes usar el plugin cq-gears aquí\n"
+            "    return cq.Workplane('XY').cylinder(thickness, diameter / 2)\n\n"
+            "def create_hex_nut(size_m, thickness):\n"
+            "    nut = cq.Workplane('XY').polygon(6, size_m * 1.8).extrude(thickness)\n"
+            "    return nut.faces('>Z').workplane().hole(size_m)\n\n"
+            "# --- CODIGO GENERADO POR IA ---\n"
+        )
         injected_footer = (
             "\n# --- EXPORTACION AUTOMATICA ---\n"
             "if 'result' not in locals():\n"
