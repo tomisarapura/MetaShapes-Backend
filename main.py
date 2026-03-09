@@ -70,22 +70,23 @@ async def create_generation_job(
         message="Trabajo guardado y en proceso"
     )
 
+# --- main.py (Reemplaza la sección de GET /jobs hacia abajo) ---
+
 @app.get("/jobs", response_model=list[JobStatusResponse])
 def get_all_jobs(db: Session = Depends(get_db)):
     jobs = db.query(models.GenerationJob).order_by(models.GenerationJob.created_at.desc()).all()
-    # Mapeamos explícitamente 'id' de la BD a 'job_id' del esquema
     return [
         JobStatusResponse(
-            job_id=job.id,
-            prompt=job.prompt,
-            status=job.status,
-            file_url=job.file_url
+            job_id=job.id, prompt=job.prompt, status=job.status, file_url=job.file_url
         ) for job in jobs
     ]
 
-# <-- AGREGAR EL NUEVO ENDPOINT AQUÍ
-@app.get("/jobs", response_model=List[JobStatusResponse])
-def get_all_jobs(db: Session = Depends(get_db)):
-    # Devuelve todos los trabajos ordenados por el más reciente
-    jobs = db.query(models.GenerationJob).order_by(models.GenerationJob.created_at.desc()).all()
-    return jobs
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+def get_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(models.GenerationJob).filter(models.GenerationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Trabajo no encontrado")
+    
+    return JobStatusResponse(
+        job_id=job.id, prompt=job.prompt, status=job.status, file_url=job.file_url
+    )
