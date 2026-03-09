@@ -1,4 +1,5 @@
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from database import engine, get_db, Base
@@ -17,6 +18,14 @@ app = FastAPI(
     title="MetaShapes API",
     description="API para orquestar la generación de modelos 3D a partir de texto",
     version="0.1.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Permite cualquier origen (en producción esto debería ser la URL exacta de tu frontend)
+    allow_credentials=True,
+    allow_methods=["*"], # Permite todos los métodos (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"], # Permite todos los headers
 )
 
 # --- ESQUEMAS (Pydantic) ---
@@ -61,20 +70,18 @@ async def create_generation_job(
         message="Trabajo guardado y en proceso"
     )
 
-@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
-def get_job_status(job_id: str, db: Session = Depends(get_db)):
-    # Buscamos el trabajo en la base de datos
-    job = db.query(models.GenerationJob).filter(models.GenerationJob.id == job_id).first()
-    
-    if not job:
-        raise HTTPException(status_code=404, detail="Trabajo no encontrado")
-        
-    return JobStatusResponse(
-        job_id=job.id,
-        prompt=job.prompt,
-        status=job.status,
-        file_url=job.file_url
-    )
+@app.get("/jobs", response_model=list[JobStatusResponse])
+def get_all_jobs(db: Session = Depends(get_db)):
+    jobs = db.query(models.GenerationJob).order_by(models.GenerationJob.created_at.desc()).all()
+    # Mapeamos explícitamente 'id' de la BD a 'job_id' del esquema
+    return [
+        JobStatusResponse(
+            job_id=job.id,
+            prompt=job.prompt,
+            status=job.status,
+            file_url=job.file_url
+        ) for job in jobs
+    ]
 
 # <-- AGREGAR EL NUEVO ENDPOINT AQUÍ
 @app.get("/jobs", response_model=List[JobStatusResponse])
